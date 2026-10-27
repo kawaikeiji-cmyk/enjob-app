@@ -1,57 +1,36 @@
-import csv
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import streamlit as st
 
-# screensフォルダの1つ上にあるプロジェクトフォルダを基準に、保存先を決めます。
-CSV_PATH = Path(__file__).resolve().parent.parent / "data" / "company_research.csv"
+from supabase_store import (
+    CompanyResearchError,
+    load_company_research,
+    save_company_research,
+)
 
 
-def save_company_research(company_name, company_url, selections, research):
-    """登録内容をCSVに1件追記します。見出しは新規作成時だけ書きます。"""
-    CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
-    is_new_file = not CSV_PATH.exists()
-    registered_at = datetime.now(timezone(timedelta(hours=9)))
-    headers = [
-        "登録日時",
-        "企業名",
-        "企業URL",
-        *[
-            f"STEP{step}_選択{item}"
-            for step in range(1, 4)
-            for item in range(1, 4)
-        ],
-        "企業研究内容",
-    ]
-    row = [
-        registered_at.strftime("%Y-%m-%d %H:%M:%S"),
-        company_name,
-        company_url,
-        *[item for items in selections.values() for item in items],
-        research,
-    ]
-
-    # UTF-8 BOM付きにすると、Excelで日本語が文字化けしにくくなります。
-    # newline=""とcsv.writerで、改行やカンマを含む長文も正しく保存します。
-    with CSV_PATH.open("a", encoding="utf-8-sig", newline="") as csv_file:
-        writer = csv.writer(csv_file)
-        if is_new_file:
-            writer.writerow(headers)
-        writer.writerow(row)
+def format_registered_at(value):
+    """Supabaseの登録日時を、これまでと同じ日本時間の表示にします。"""
+    if not value:
+        return "（未設定）"
+    registered_at = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if registered_at.tzinfo is None:
+        registered_at = registered_at.replace(tzinfo=timezone.utc)
+    return registered_at.astimezone(timezone(timedelta(hours=9))).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
 
 
 def load_company_list():
-    """CSVから、一覧に表示する企業名と登録日時だけを取り出します。"""
-    try:
-        with CSV_PATH.open("r", encoding="utf-8-sig", newline="") as csv_file:
-            reader = csv.DictReader(csv_file)
-            return [
-                {"企業名": row["企業名"], "登録日時": row["登録日時"]}
-                for row in reader
-            ]
-    except FileNotFoundError:
-        return []
+    """Supabaseから、一覧に表示する企業名と登録日時を読み込みます。"""
+    rows = load_company_research("company_name,created_at")
+    return [
+        {
+            "企業名": row["company_name"],
+            "登録日時": format_registered_at(row["created_at"]),
+        }
+        for row in rows
+    ]
 
 
 if st.button("ホームへ戻る"):
@@ -136,7 +115,7 @@ with st.form("company_research", enter_to_submit=False):
         "登録する", type="primary", width="stretch"
     )
 
-# 必須項目と選択数を確認し、問題がない場合だけCSVに保存します。
+# 必須項目と選択数を確認し、問題がない場合だけSupabaseに保存します。
 if submitted:
     errors = []
     if not company_name.strip():
@@ -154,10 +133,10 @@ if submitted:
     else:
         try:
             save_company_research(company_name, company_url, selections, research)
-        except OSError as error:
-            st.error(f"CSVに保存できませんでした：{error}")
+        except CompanyResearchError as error:
+            st.error(str(error))
         else:
-            st.success("CSVに保存しました。")
+            st.success("企業研究を保存しました。")
             st.divider()
             st.subheader("入力内容の確認")
             st.markdown("**企業名**")
@@ -172,13 +151,13 @@ if submitted:
             st.text(research)
 
 
-# 保存処理の後にCSVを読み込むので、新しく登録した企業も一覧に表示されます。
+# 保存処理の後に読み込むので、新しく登録した企業も一覧に表示されます。
 st.divider()
 st.header("登録済み企業一覧")
 try:
     company_list = load_company_list()
-except (OSError, UnicodeError, csv.Error) as error:
-    st.error(f"企業一覧を読み込めませんでした：{error}")
+except CompanyResearchError as error:
+    st.error(str(error))
 else:
     if company_list:
         st.table(company_list, hide_index=True)

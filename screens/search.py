@@ -1,60 +1,42 @@
-import csv
-from pathlib import Path
-
 import streamlit as st
 
-# 登録画面と同じCSVを読み込みます。検索では書き込みません。
-CSV_PATH = Path(__file__).resolve().parent.parent / "data" / "company_research.csv"
+from supabase_store import CompanyResearchError, load_company_research
 
 
 def search_companies(selections):
     """企業ごとの最高一致数・その投稿のSTEP別一致数・投稿件数を返します。"""
     companies = {}
-    try:
-        with CSV_PATH.open("r", encoding="utf-8-sig", newline="") as csv_file:
-            reader = csv.DictReader(csv_file)
-            if reader.fieldnames is None:
-                return []
-            required_columns = {"企業名"} | {
-                f"STEP{step}_選択{item}"
-                for step in range(1, 4)
-                for item in range(1, 4)
-            }
-            if not required_columns.issubset(reader.fieldnames):
-                raise ValueError("CSVに企業名または自己分析Aの列がありません。")
+    rows = load_company_research(
+        "company_name,step1_choices,step2_choices,step3_choices"
+    )
+    for row in rows:
+        company_name = row["company_name"]
+        if not company_name or not company_name.strip():
+            continue
 
-            for row in reader:
-                company_name = row["企業名"]
-                if not company_name or not company_name.strip():
-                    continue
+        # 同じSTEPの中だけで比較します。選んだ順番は問いません。
+        step_matches = []
+        for step in range(1, 4):
+            registered_items = set(row[f"step{step}_choices"] or [])
+            matches = len(set(selections[step]) & registered_items)
+            step_matches.append(matches)
+        total_matches = sum(step_matches)
 
-                # 同じSTEPの中だけで比較します。選んだ順番は問いません。
-                step_matches = []
-                for step in range(1, 4):
-                    registered_items = {
-                        row[f"STEP{step}_選択{item}"] for item in range(1, 4)
-                    }
-                    matches = len(set(selections[step]) & registered_items)
-                    step_matches.append(matches)
-                total_matches = sum(step_matches)
-
-                company = companies.setdefault(
-                    company_name,
-                    {
-                        "企業名": company_name,
-                        "一致数": -1,
-                        "STEP別一致数": [],
-                        "企業研究件数": 0,
-                    },
-                )
-                company["企業研究件数"] += 1
-                # STEPごとの最高値を混ぜず、最高点の投稿1件の内訳を使います。
-                # 同点の場合は、CSVで先に登録された投稿の内訳を保持します。
-                if total_matches > company["一致数"]:
-                    company["一致数"] = total_matches
-                    company["STEP別一致数"] = step_matches
-    except FileNotFoundError:
-        return []
+        company = companies.setdefault(
+            company_name,
+            {
+                "企業名": company_name,
+                "一致数": -1,
+                "STEP別一致数": [],
+                "企業研究件数": 0,
+            },
+        )
+        company["企業研究件数"] += 1
+        # STEPごとの最高値を混ぜず、最高点の投稿1件の内訳を使います。
+        # 同点の場合は、先に登録された投稿の内訳を保持します。
+        if total_matches > company["一致数"]:
+            company["一致数"] = total_matches
+            company["STEP別一致数"] = step_matches
 
     # 同じ類似度の場合は、企業名の順に並べます。
     return sorted(
@@ -146,8 +128,8 @@ if submitted:
     else:
         try:
             companies = search_companies(selections)
-        except (OSError, UnicodeError, csv.Error, ValueError) as error:
-            st.error(f"企業研究データを読み込めませんでした：{error}")
+        except CompanyResearchError as error:
+            st.error(str(error))
         else:
             st.divider()
             st.header("検索結果")
