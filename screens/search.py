@@ -4,10 +4,10 @@ from supabase_store import CompanyResearchError, load_company_research
 
 
 def search_companies(selections):
-    """企業ごとの最高一致数・その投稿のSTEP別一致数・投稿件数を返します。"""
+    """投稿ごとの一致数を計算し、企業ごとにまとめて返します。"""
     companies = {}
     rows = load_company_research(
-        "company_name,step1_choices,step2_choices,step3_choices"
+        "company_name,company_url,step1_choices,step2_choices,step3_choices,research_text"
     )
     for row in rows:
         company_name = row["company_name"]
@@ -26,29 +26,78 @@ def search_companies(selections):
             company_name,
             {
                 "企業名": company_name,
-                "一致数": -1,
-                "STEP別一致数": [],
-                "企業研究件数": 0,
+                "並び替え用一致数": 0,
+                "企業研究": [],
             },
         )
-        company["企業研究件数"] += 1
-        # STEPごとの最高値を混ぜず、最高点の投稿1件の内訳を使います。
-        # 同点の場合は、先に登録された投稿の内訳を保持します。
-        if total_matches > company["一致数"]:
-            company["一致数"] = total_matches
-            company["STEP別一致数"] = step_matches
+        company["企業研究"].append(
+            {
+                "一致数": total_matches,
+                "STEP別一致数": step_matches,
+                "企業URL": row["company_url"] or "",
+                "STEP別選択内容": [
+                    list(row[f"step{step}_choices"] or []) for step in range(1, 4)
+                ],
+                "企業研究内容": row["research_text"] or "",
+            }
+        )
+        # 企業の最高一致数は並び替えだけに使い、画面には表示しません。
+        company["並び替え用一致数"] = max(
+            company["並び替え用一致数"], total_matches
+        )
+
+    for company in companies.values():
+        company["企業研究"].sort(key=lambda post: -post["一致数"])
+        company["企業研究件数"] = len(company["企業研究"])
 
     # 同じ類似度の場合は、企業名の順に並べます。
     return sorted(
-        companies.values(), key=lambda company: (-company["一致数"], company["企業名"])
+        companies.values(),
+        key=lambda company: (-company["並び替え用一致数"], company["企業名"]),
     )
 
 
+def show_more_posts(company_index):
+    """表示件数を3件増やします。検索結果は再取得せず、そのまま保持します。"""
+    visible_counts = st.session_state["company_search_visible_posts"]
+    visible_counts[company_index] = visible_counts.get(company_index, 3) + 3
+
+
+def render_research(post, number, widget_key):
+    """投稿1件の一致度と内容を、スマートフォン向けに縦1列で表示します。"""
+    with st.container(border=True):
+        st.markdown(f"**企業研究 {number}**")
+        st.markdown(f"**投稿者との類似度：{post['一致数'] / 9 * 100:.1f}%**")
+        st.text(
+            "　".join(
+                f"STEP{step}：{matches}/3"
+                for step, matches in enumerate(post["STEP別一致数"], start=1)
+            )
+        )
+        st.markdown("**企業URL**")
+        st.text(post["企業URL"] or "（未入力）")
+        for step, choices in enumerate(post["STEP別選択内容"], start=1):
+            st.markdown(f"**STEP{step}の選択内容**")
+            st.text("\n".join(f"・{item}" for item in choices) or "（未入力）")
+
+        st.markdown("**企業研究内容**")
+        research = post["企業研究内容"]
+        show_full = False
+        if len(research) > 300:
+            show_full = st.toggle("全文を表示", key=f"{widget_key}_full_text")
+        if len(research) > 300 and not show_full:
+            st.text(research[:300] + "…")
+        else:
+            st.text(research or "（未入力）")
+
+
 if st.button("ホームへ戻る"):
+    st.session_state.pop("company_search_results", None)
+    st.session_state.pop("company_search_visible_posts", None)
     st.switch_page("screens/home.py")
 
 st.title("企業検索")
-st.caption("自己分析Aの各STEPで3項目ずつ選ぶと、類似度の高い企業を探せます。")
+st.caption("自己分析Aの各STEPで3項目ずつ選び、投稿者との一致度から企業研究を探せます。")
 
 # 企業登録画面と同じ14項目を、同じ順番で表示します。
 step_options = {
@@ -121,6 +170,12 @@ with st.form("company_search", enter_to_submit=False):
     )
 
 if submitted:
+    # 新しい検索では、以前の結果や追加表示件数をリセットします。
+    st.session_state.pop("company_search_results", None)
+    st.session_state["company_search_visible_posts"] = {}
+    st.session_state["company_search_generation"] = (
+        st.session_state.get("company_search_generation", 0) + 1
+    )
     invalid_steps = [step for step, items in selections.items() if len(items) != 3]
     if invalid_steps:
         for step in invalid_steps:
@@ -131,23 +186,42 @@ if submitted:
         except CompanyResearchError as error:
             st.error(str(error))
         else:
-            st.divider()
-            st.header("検索結果")
-            if not companies:
-                st.info("まだ企業研究が登録されていません")
-            else:
-                st.caption(
-                    "類似度は一致数 ÷ 9 × 100です。同じ企業は最高類似度の投稿を表示します。"
-                )
-                result_rows = [
-                    {
-                        "企業名": company["企業名"],
-                        "類似度": f"{company['一致数'] / 9 * 100:.1f}%",
-                        "STEP1の一致数": f"{company['STEP別一致数'][0]}/3",
-                        "STEP2の一致数": f"{company['STEP別一致数'][1]}/3",
-                        "STEP3の一致数": f"{company['STEP別一致数'][2]}/3",
-                        "企業研究件数": company["企業研究件数"],
-                    }
-                    for company in companies
-                ]
-                st.table(result_rows, hide_index=True)
+            st.session_state["company_search_results"] = companies
+
+# ボタンや全文表示の操作で再実行されても、検索結果を残します。
+if "company_search_results" in st.session_state:
+    companies = st.session_state["company_search_results"]
+    st.divider()
+    st.header("検索結果")
+    if not companies:
+        st.info("まだ企業研究が登録されていません")
+    else:
+        st.caption(
+            "企業名をタップすると、企業研究の投稿ごとの一致度と内容が開きます。"
+            "類似度は、投稿者とあなたの自己分析Aの一致数 ÷ 9 × 100です。"
+        )
+        generation = st.session_state["company_search_generation"]
+        visible_counts = st.session_state["company_search_visible_posts"]
+        for company_index, company in enumerate(companies):
+            company_key = f"search_company_{generation}_{company_index}"
+            with st.expander(
+                f"{company['企業名']} ｜ 企業研究 {company['企業研究件数']}件",
+                key=company_key,
+            ):
+                posts = company["企業研究"]
+                visible_count = min(visible_counts.get(company_index, 3), len(posts))
+                st.caption(f"投稿者との類似度が高い順に {visible_count} / {len(posts)}件を表示")
+                for post_index, post in enumerate(posts[:visible_count]):
+                    render_research(
+                        post,
+                        post_index + 1,
+                        f"{company_key}_post_{post_index}",
+                    )
+                if visible_count < len(posts):
+                    st.button(
+                        "他の企業研究を見る（次の3件）",
+                        key=f"{company_key}_more",
+                        on_click=show_more_posts,
+                        args=(company_index,),
+                        width="stretch",
+                    )
